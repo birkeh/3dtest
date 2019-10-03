@@ -6,13 +6,23 @@
 #include <Qt3DCore/QTransform>
 #include <Qt3DCore/QAspectEngine>
 
-#include <Qt3DRender/qrenderaspect.h>
+#include <Qt3DRender/QRenderStateSet>
+#include <Qt3DRender/QRenderAspect>
+#include <Qt3DExtras/QForwardRenderer>
 #include <Qt3DRender/QCamera>
+#include <Qt3DRender/QCameraLens>
 #include <Qt3DRender/QMaterial>
 
 #include <Qt3DExtras/Qt3DWindow>
 #include <Qt3DExtras/QTorusMesh>
 #include <Qt3DExtras/QExtrudedTextMesh>
+#include <Qt3DExtras/QPerVertexColorMaterial>
+
+#include <Qt3DRender/QGeometryRenderer>
+#include <Qt3DRender/QGeometry>
+#include <Qt3DRender/QAttribute>
+#include <Qt3DRender/QBuffer>
+#include <QPropertyAnimation>
 
 #include <Qt3DExtras/QOrbitCameraController>
 #include <Qt3DExtras/QPhongMaterial>
@@ -21,59 +31,8 @@
 
 #include <Qt3DRender/QSceneLoader>
 
+#include <Qt3DInput/QInputAspect>
 
-class SceneWalker : public QObject
-{
-public:
-	SceneWalker(Qt3DRender::QSceneLoader *loader) : m_loader(loader) { }
-
-	void onStatusChanged();
-
-private:
-	void walkEntity(Qt3DCore::QEntity *e, int depth = 0);
-
-	Qt3DRender::QSceneLoader *m_loader;
-};
-
-void SceneWalker::onStatusChanged()
-{
-	qDebug() << "Status changed:" << m_loader->status();
-	if (m_loader->status() != Qt3DRender::QSceneLoader::Ready)
-		return;
-
-	// The QSceneLoader instance is a component of an entity. The loaded scene
-	// tree is added under this entity.
-	QVector<Qt3DCore::QEntity *> entities = m_loader->entities();
-
-	// Technically there could be multiple entities referencing the scene loader
-	// but sharing is discouraged, and in our case there will be one anyhow.
-	if (entities.isEmpty())
-		return;
-	Qt3DCore::QEntity *root = entities[0];
-	// Print the tree.
-	walkEntity(root);
-
-	// To access a given node (like a named mesh in the scene), use QObject::findChild().
-	// The scene structure and names always depend on the asset.
-	Qt3DCore::QEntity *e = root->findChild<Qt3DCore::QEntity *>(QStringLiteral("PlanePropeller_mesh")); // toyplane.obj
-	if (e)
-		qDebug() << "Found propeller node" << e << "with components" << e->components();
-}
-
-void SceneWalker::walkEntity(Qt3DCore::QEntity *e, int depth)
-{
-	Qt3DCore::QNodeVector nodes = e->childNodes();
-	for (int i = 0; i < nodes.count(); ++i) {
-		Qt3DCore::QNode *node = nodes[i];
-		Qt3DCore::QEntity *entity = qobject_cast<Qt3DCore::QEntity *>(node);
-		if (entity) {
-			QString indent;
-			indent.fill(' ', depth * 2);
-			qDebug().noquote() << indent << "Entity:" << entity << "Components:" << entity->components();
-			walkEntity(entity, depth + 1);
-		}
-	}
-}
 
 cMainWindow::cMainWindow(QWidget *parent) :
 	QMainWindow(parent),
@@ -81,63 +40,184 @@ cMainWindow::cMainWindow(QWidget *parent) :
 {
 	ui->setupUi(this);
 
-	Qt3DExtras::Qt3DWindow*						view			= new Qt3DExtras::Qt3DWindow();
+	Qt3DExtras::Qt3DWindow*				view				= new Qt3DExtras::Qt3DWindow();
+	view->defaultFrameGraph()->setClearColor(QColor::fromRgbF(0.0, 0.5, 1.0, 1.0));
 
-	// Scene Root
-	Qt3DCore::QEntity*							sceneRoot		= new Qt3DCore::QEntity();
+	// Root entity
+	Qt3DCore::QEntity*					rootEntity			= new Qt3DCore::QEntity();
 
-	// Scene Camera
-	Qt3DRender::QCamera*						basicCamera		= view->camera();
-	basicCamera->setProjectionType(Qt3DRender::QCameraLens::PerspectiveProjection);
-	basicCamera->setUpVector(QVector3D(0.0f, 1.0f, 0.0f));
-	basicCamera->setViewCenter(QVector3D(0.0f, 3.5f, 0.0f));
-	basicCamera->setPosition(QVector3D(0.0f, 3.5f, 25.0f));
+	// Camera
+	Qt3DRender::QCamera*				cameraEntity		= view->camera();
+
+	cameraEntity->lens()->setPerspectiveProjection(45.0f, 16.0f/9.0f, 0.1f, 1000.0f);
+	cameraEntity->setPosition(QVector3D(0, 0, -40.0f));
+	cameraEntity->setUpVector(QVector3D(0, 1, 0));
+	cameraEntity->setViewCenter(QVector3D(0, 0, 0));
 
 	// For camera controls
-	Qt3DExtras::QFirstPersonCameraController*	camController	= new Qt3DExtras::QFirstPersonCameraController(sceneRoot);
-	camController->setCamera(basicCamera);
+	Qt3DExtras::QOrbitCameraController*	camController		= new Qt3DExtras::QOrbitCameraController(rootEntity);
+	camController->setCamera(cameraEntity);
 
-	Qt3DCore::QEntity*			sceneLoaderEntity	= new Qt3DCore::QEntity(sceneRoot);
-	Qt3DRender::QSceneLoader*	sceneLoader			= new Qt3DRender::QSceneLoader(sceneLoaderEntity);
-	SceneWalker sceneWalker(sceneLoader);
-	QObject::connect(sceneLoader, &Qt3DRender::QSceneLoader::statusChanged, &sceneWalker, &SceneWalker::onStatusChanged);
-	sceneLoaderEntity->addComponent(sceneLoader);
+	// Material
+	Qt3DRender::QMaterial*				material			= new Qt3DExtras::QPerVertexColorMaterial(rootEntity);
 
-	sceneLoader->setSource(QUrl::fromLocalFile("C:\\Users\\VET0572\\OneDrive - WINDESIGN\\Villa Kunterbunt\\OBJ\\New Folder.obj"));
+	// Torus
+	Qt3DCore::QEntity*					customMeshEntity	= new Qt3DCore::QEntity(rootEntity);
 
-	view->setRootEntity(sceneRoot);
+	// Transform
+	Qt3DCore::QTransform*				transform			= new Qt3DCore::QTransform;
+	transform->setScale(8.0f);
+
+	// Custom Mesh (Tetrahedron)
+	Qt3DRender::QGeometryRenderer*		customMeshRenderer	= new Qt3DRender::QGeometryRenderer;
+	Qt3DRender::QGeometry*				customGeometry		= new Qt3DRender::QGeometry(customMeshRenderer);
+
+	Qt3DRender::QBuffer*				vertexDataBuffer	= new Qt3DRender::QBuffer(customGeometry);
+	Qt3DRender::QBuffer*				indexDataBuffer		= new Qt3DRender::QBuffer(customGeometry);
+
+	// vec3 for position
+	// vec3 for colors
+	// vec3 for normals
+
+	/*          2
+			   /|\
+			  / | \
+			 / /3\ \
+			 0/___\ 1
+	*/
+
+	// 4 distinct vertices
+	QByteArray	vertexBufferData;
+	vertexBufferData.resize(4 * (3 + 3 + 3) * sizeof(float));
+
+	// Vertices
+	QVector3D	v0(-1.0f, 0.0f, -1.0f);
+	QVector3D	v1(1.0f, 0.0f, -1.0f);
+	QVector3D	v2(0.0f, 1.0f, 0.0f);
+	QVector3D	v3(0.0f, 0.0f, 1.0f);
+
+	// Faces Normals
+	QVector3D	n023	= QVector3D::normal(v0, v2, v3);
+	QVector3D	n012	= QVector3D::normal(v0, v1, v2);
+	QVector3D	n310	= QVector3D::normal(v3, v1, v0);
+	QVector3D	n132	= QVector3D::normal(v1, v3, v2);
+
+	// Vector Normals
+	QVector3D	n0		= QVector3D(n023 + n012 + n310).normalized();
+	QVector3D	n1		= QVector3D(n132 + n012 + n310).normalized();
+	QVector3D	n2		= QVector3D(n132 + n012 + n023).normalized();
+	QVector3D	n3		= QVector3D(n132 + n310 + n023).normalized();
+
+	// Colors
+	QVector3D	red(1.0f, 0.0f, 0.0f);
+	QVector3D	green(0.0f, 1.0f, 0.0f);
+	QVector3D	blue(0.0f, 0.0f, 1.0f);
+	QVector3D	white(1.0f, 1.0f, 1.0f);
+
+	QVector<QVector3D> vertices = QVector<QVector3D>()
+			<< v0 << n0 << red
+			<< v1 << n1 << blue
+			<< v2 << n2 << green
+			<< v3 << n3 << white;
+
+	float*	rawVertexArray	= reinterpret_cast<float *>(vertexBufferData.data());
+	int		idx				= 0;
+
+	for (const QVector3D &v : vertices)
+	{
+		rawVertexArray[idx++] = v.x();
+		rawVertexArray[idx++] = v.y();
+		rawVertexArray[idx++] = v.z();
+	}
+
+	// Indices (12)
+	QByteArray	indexBufferData;
+	indexBufferData.resize(4 * 3 * sizeof(ushort));
+	ushort*		rawIndexArray	= reinterpret_cast<ushort *>(indexBufferData.data());
+
+	// Front
+	rawIndexArray[0]	= 0;
+	rawIndexArray[1]	= 1;
+	rawIndexArray[2]	= 2;
+	// Bottom
+	rawIndexArray[3]	= 3;
+	rawIndexArray[4]	= 1;
+	rawIndexArray[5]	= 0;
+	// Left
+	rawIndexArray[6]	= 0;
+	rawIndexArray[7]	= 2;
+	rawIndexArray[8]	= 3;
+	// Right
+	rawIndexArray[9]	= 1;
+	rawIndexArray[10]	= 3;
+	rawIndexArray[11]	= 2;
+
+	vertexDataBuffer->setData(vertexBufferData);
+	indexDataBuffer->setData(indexBufferData);
+
+	// Attributes
+	Qt3DRender::QAttribute*	positionAttribute	= new Qt3DRender::QAttribute();
+	positionAttribute->setAttributeType(Qt3DRender::QAttribute::VertexAttribute);
+	positionAttribute->setBuffer(vertexDataBuffer);
+	positionAttribute->setVertexBaseType(Qt3DRender::QAttribute::Float);
+	positionAttribute->setVertexSize(3);
+	positionAttribute->setByteOffset(0);
+	positionAttribute->setByteStride(9 * sizeof(float));
+	positionAttribute->setCount(4);
+	positionAttribute->setName(Qt3DRender::QAttribute::defaultPositionAttributeName());
+
+	Qt3DRender::QAttribute *normalAttribute = new Qt3DRender::QAttribute();
+	normalAttribute->setAttributeType(Qt3DRender::QAttribute::VertexAttribute);
+	normalAttribute->setBuffer(vertexDataBuffer);
+	normalAttribute->setVertexBaseType(Qt3DRender::QAttribute::Float);
+	normalAttribute->setVertexSize(3);
+	normalAttribute->setByteOffset(3 * sizeof(float));
+	normalAttribute->setByteStride(9 * sizeof(float));
+	normalAttribute->setCount(4);
+	normalAttribute->setName(Qt3DRender::QAttribute::defaultNormalAttributeName());
+
+	Qt3DRender::QAttribute *colorAttribute = new Qt3DRender::QAttribute();
+	colorAttribute->setAttributeType(Qt3DRender::QAttribute::VertexAttribute);
+	colorAttribute->setBuffer(vertexDataBuffer);
+	colorAttribute->setVertexBaseType(Qt3DRender::QAttribute::Float);
+	colorAttribute->setVertexSize(3);
+	colorAttribute->setByteOffset(6 * sizeof(float));
+	colorAttribute->setByteStride(9 * sizeof(float));
+	colorAttribute->setCount(4);
+	colorAttribute->setName(Qt3DRender::QAttribute::defaultColorAttributeName());
+
+	Qt3DRender::QAttribute *indexAttribute = new Qt3DRender::QAttribute();
+	indexAttribute->setAttributeType(Qt3DRender::QAttribute::IndexAttribute);
+	indexAttribute->setBuffer(indexDataBuffer);
+	indexAttribute->setVertexBaseType(Qt3DRender::QAttribute::UnsignedShort);
+	indexAttribute->setVertexSize(1);
+	indexAttribute->setByteOffset(0);
+	indexAttribute->setByteStride(0);
+	indexAttribute->setCount(12);
+
+	customGeometry->addAttribute(positionAttribute);
+	customGeometry->addAttribute(normalAttribute);
+	customGeometry->addAttribute(colorAttribute);
+	customGeometry->addAttribute(indexAttribute);
+
+	customMeshRenderer->setInstanceCount(1);
+	customMeshRenderer->setFirstVertex(0);
+	customMeshRenderer->setFirstInstance(0);
+	customMeshRenderer->setPrimitiveType(Qt3DRender::QGeometryRenderer::Triangles);
+	customMeshRenderer->setGeometry(customGeometry);
+	// 4 faces of 3 points
+	customMeshRenderer->setVertexCount(12);
+
+	customMeshEntity->addComponent(customMeshRenderer);
+	customMeshEntity->addComponent(transform);
+	customMeshEntity->addComponent(material);
+
+	view->setRootEntity(rootEntity);
+
 
 	QWidget*	m_lp3DWidget = QWidget::createWindowContainer(view);
 	ui->gridLayout->addWidget(m_lp3DWidget, 0, 0, 1, 1);
 }
-
-//cMainWindow::cMainWindow(QWidget *parent) :
-//	QMainWindow(parent),
-//	ui(new Ui::cMainWindow)
-//{
-//	ui->setupUi(this);
-
-//	Qt3DExtras::Qt3DWindow* view	= new Qt3DExtras::Qt3DWindow();
-//	Qt3DCore::QEntity* scene = createTestScene();
-
-//	// camera
-//	Qt3DRender::QCamera *camera = view->camera();
-//	camera->lens()->setPerspectiveProjection(45.0f, 16.0f/9.0f, 0.1f, 1000.0f);
-//	camera->setPosition(QVector3D(0, 0, 40.0f));
-//	camera->setViewCenter(QVector3D(0, 0, 0));
-
-//	// manipulator
-//	Qt3DExtras::QOrbitCameraController* manipulator = new Qt3DExtras::QOrbitCameraController(scene);
-//	manipulator->setLinearSpeed(50.f);
-//	manipulator->setLookSpeed(180.f);
-//	manipulator->setCamera(camera);
-
-//	view->setRootEntity(scene);
-
-
-//	QWidget*	m_lp3DWidget = QWidget::createWindowContainer(view);
-//	ui->gridLayout->addWidget(m_lp3DWidget, 0, 0, 1, 1);
-//}
 
 cMainWindow::~cMainWindow()
 {
